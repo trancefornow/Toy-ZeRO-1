@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local IDE and tool state
+.vs/
+.vscode/
+.agents/
+
+# Training outputs
+checkpoints/
+runs/
+logs/
+outputs/
+*.pt
+*.pth
+
+# OS files
+.DS_Store
+Thumbs.db
+
