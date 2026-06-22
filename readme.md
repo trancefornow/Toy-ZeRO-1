@@ -65,6 +65,8 @@ Toy-ZeRO-1/
 ├── scripts/
 │   ├── smoke_distributed.py
 │   ├── run_smoke_distributed.sh
+│   ├── smoke_model.py
+│   ├── run_smoke_model.sh
 │   ├── run_baseline.sh
 │   └── run_zero.sh
 ├── train_baseline.py
@@ -145,6 +147,18 @@ input_dim -> hidden_dim -> hidden_dim -> num_classes
 ```
 
 后续可通过 `hidden_dim` 和 `num_layers` 放大参数规模，用于观察 optimizer states 的显存差异。
+
+模型与数据 smoke test 会运行一次 forward / backward / Adam step，确认 loss、梯度和显存记录链路正常：
+
+```bash
+bash scripts/run_smoke_model.sh
+```
+
+也可以放大模型做快速压力测试：
+
+```bash
+bash scripts/run_smoke_model.sh --hidden-dim 1024 --num-hidden-layers 4 --batch-size 64
+```
 
 ### Phase 3: DDP + Adam 基线
 
@@ -256,7 +270,7 @@ bash scripts/run_zero.sh
 - [x] 重写 README 与建设路线
 - [x] 实现分布式初始化工具
 - [x] 实现分布式 smoke test
-- [ ] 实现 MLP 与 synthetic data
+- [x] 实现 MLP 与 synthetic data
 - [ ] 实现 DDP + Adam baseline
 - [ ] 实现 ZeroAdam optimizer states 分片
 - [ ] 实现 ZeRO-1 训练入口
