@@ -1,44 +1,49 @@
 # Toy-ZeRO-1
 
-Toy-ZeRO-1 是一个从零实现 ZeRO-1 优化器状态分片的教学项目。项目目标不是复刻 DeepSpeed 的完整工程能力，而是用 PyTorch 原生 `torch.distributed` 和 NCCL，把 ZeRO-1 的核心机制拆开、写清楚、跑通，并用标准 DDP + Adam 作为正确性基线。
+Toy-ZeRO-1 是一个单 GPU 教学项目，用 PyTorch 从零实现 ZeRO-1 的核心优化器状态管理思路。
 
-本项目默认开发与运行环境是 WSL2 Ubuntu，项目最终应放在 Linux 原生文件系统：
+本项目的硬件前提固定为：
+
+```text
+1 x NVIDIA GPU
+WSL2 Ubuntu
+Conda environment: toy-zero
+PyTorch + CUDA
+```
+
+因此，本项目不再以多 GPU 显存节省作为验证目标。后续实现会围绕单 GPU 展开：
+
+- 用标准 `torch.optim.Adam` 建立 baseline。
+- 用手写 `ZeroAdam` 复现 Adam 更新路径。
+- 在 `world_size=1` 下验证 `ZeroAdam` 与标准 Adam 的 loss 对齐和参数更新正确性。
+- 保留 flatten / shard / write-back 结构，为理解 ZeRO-1 做准备。
+
+## 环境
+
+项目最终应放在 WSL Linux 原生文件系统：
 
 ```bash
 ~/Toy-ZeRO-1
 ```
 
-推荐运行环境：
+推荐检查：
 
 ```bash
+cd ~/Toy-ZeRO-1
 conda activate toy-zero
 python --version
-python -c "import torch; print(torch.cuda.is_available()); print(torch.distributed.is_nccl_available())"
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-期望 CUDA 和 NCCL 均可用：
+期望 CUDA 可用：
 
 ```text
 True
-True
 ```
 
-当前项目按单 GPU 环境优先建设。单 GPU 下 `world_size=1`，ZeRO-1 的 optimizer state shard 等价于完整 state，因此可以验证代码路径、Adam 更新逻辑和 loss 对齐，但不能观察到跨 GPU 分片带来的显存节省。真正的 `1 / world_size` optimizer state 显存收益需要至少 2 张 GPU。
+## 单 GPU 下的 ZeRO-1 定位
 
-## 核心目标
-
-ZeRO-1 只切分优化器状态，不切分模型参数，也不切分梯度。
-
-在标准 Adam 中，每个 rank 都保存完整的优化器状态：
-
-```text
-parameters: full copy
-gradients:  full copy
-exp_avg:    full copy
-exp_avg_sq: full copy
-```
-
-在 ZeRO-1 中，每个 rank 仍保存完整参数和梯度，但 Adam 状态按 rank 切分：
+完整 ZeRO-1 在多 GPU 环境中会把 Adam optimizer states 按 rank 切分：
 
 ```text
 parameters: full copy
@@ -47,17 +52,38 @@ exp_avg:    1 / world_size shard
 exp_avg_sq: 1 / world_size shard
 ```
 
-因此，ZeRO-1 的主要收益是降低 optimizer states 的显存占用。
+但本项目只有一张 GPU，所以：
 
-## 计划目录
+```text
+world_size = 1
+```
+
+这意味着 optimizer state shard 等价于完整 state：
+
+```text
+exp_avg:    full local shard
+exp_avg_sq: full local shard
+```
+
+所以本项目的重点不是证明显存下降，而是证明：
+
+- flatten 参数和梯度的逻辑正确。
+- 本地 shard 的 Adam 更新逻辑正确。
+- 更新后的 flat parameter 能正确写回原模型。
+- `ZeroAdam` 的 loss 曲线能和标准 Adam 对齐。
+
+## 目录结构
 
 ```text
 Toy-ZeRO-1/
 ├── model/
+│   ├── __init__.py
 │   └── mlp.py
 ├── optimizer/
+│   ├── __init__.py
 │   └── zero_adam.py
 ├── utils/
+│   ├── __init__.py
 │   ├── data.py
 │   ├── distributed.py
 │   ├── memory.py
@@ -75,39 +101,45 @@ Toy-ZeRO-1/
 └── readme.md
 ```
 
-## 建设路线
+`utils/distributed.py` 和 distributed smoke test 会保留，用于确认 CUDA/NCCL 基础环境。但主训练路径后续默认使用单进程、单 GPU，不再依赖多进程 DDP。
 
-### Phase 0: 环境确认
+## 已有验证
 
-目标：确认 WSL2、conda、PyTorch、CUDA、NCCL 可以用于多进程训练。
-
-检查命令：
-
-```bash
-cd ~/Toy-ZeRO-1
-conda activate toy-zero
-python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.distributed.is_nccl_available())"
-```
-
-项目提供了一个分布式环境 smoke test。单 GPU 默认启动 1 个进程，确认进程能正确拿到 `rank`、`world_size`、`local_rank` 和 GPU device。
+分布式环境 smoke test，单 GPU 默认启动 1 个进程：
 
 ```bash
 bash scripts/run_smoke_distributed.sh
 ```
 
-单 GPU 机器不要设置 `NUM_PROCESSES=2`，否则第二个进程会尝试绑定不存在的 `cuda:1`。
-
-如果未来有多张 GPU，可显式指定进程数：
+模型和 synthetic data smoke test：
 
 ```bash
-NUM_PROCESSES=2 bash scripts/run_smoke_distributed.sh
+bash scripts/run_smoke_model.sh
 ```
 
-### Phase 1: 分布式基础工具
+可选模型压力测试：
 
-目标：封装所有训练入口都会用到的 distributed 初始化逻辑。
+```bash
+bash scripts/run_smoke_model.sh --hidden-dim 1024 --num-hidden-layers 4 --batch-size 64
+```
 
-计划文件：
+## 建设路线
+
+### Phase 0: 环境确认
+
+目标：确认 WSL2、conda、PyTorch、CUDA 可以用于单 GPU 训练。
+
+已完成：
+
+- CUDA 可用性检查。
+- 单进程 smoke test。
+- 模型 forward / backward / Adam step smoke test。
+
+### Phase 1: 基础工具
+
+目标：提供后续训练入口共享的工具模块。
+
+已实现：
 
 ```text
 utils/distributed.py
@@ -115,54 +147,32 @@ utils/seed.py
 utils/memory.py
 ```
 
-关键能力：
-
-- 从 `LOCAL_RANK` 设置当前 CUDA device。
-- 调用 `torch.distributed.init_process_group(backend="nccl")`。
-- 提供 `rank`、`world_size`、`local_rank`、`device`。
-- 只允许 rank 0 打印主日志。
-- 训练结束时正确 `destroy_process_group()`。
+其中 `utils/distributed.py` 主要用于环境 smoke test 和未来扩展；单 GPU 主训练脚本会直接使用 `cuda:0`。
 
 ### Phase 2: 模型与数据
 
-目标：先使用可控的小型 MLP 和 synthetic data，保证正确性验证足够稳定。
+目标：建立可复现的 synthetic classification 任务。
 
-计划文件：
+已实现：
 
 ```text
 model/mlp.py
 utils/data.py
+scripts/smoke_model.py
+scripts/run_smoke_model.sh
 ```
 
-设计原则：
-
-- 数据由固定 seed 生成，不依赖外部下载。
-- 输入、标签、模型初始化都要可复现。
-- 第一版模型使用 MLP，避免 Transformer 细节干扰 ZeRO-1 逻辑。
-
-初始模型形态：
+当前模型：
 
 ```text
-input_dim -> hidden_dim -> hidden_dim -> num_classes
+input_dim -> hidden_dim -> ... -> hidden_dim -> num_classes
 ```
 
-后续可通过 `hidden_dim` 和 `num_layers` 放大参数规模，用于观察 optimizer states 的显存差异。
+数据由固定 seed 的随机 teacher 生成，不依赖外部下载。
 
-模型与数据 smoke test 会运行一次 forward / backward / Adam step，确认 loss、梯度和显存记录链路正常：
+### Phase 3: 单 GPU Adam Baseline
 
-```bash
-bash scripts/run_smoke_model.sh
-```
-
-也可以放大模型做快速压力测试：
-
-```bash
-bash scripts/run_smoke_model.sh --hidden-dim 1024 --num-hidden-layers 4 --batch-size 64
-```
-
-### Phase 3: DDP + Adam 基线
-
-目标：建立正确性对照组。
+已实现。
 
 计划文件：
 
@@ -171,21 +181,31 @@ train_baseline.py
 scripts/run_baseline.sh
 ```
 
-训练逻辑：
+训练流程：
 
-1. 初始化 distributed。
-2. 固定 seed。
-3. 创建模型并移动到当前 GPU。
-4. 使用 `torch.nn.parallel.DistributedDataParallel` 包装模型。
-5. 使用标准 `torch.optim.Adam`。
-6. 训练固定 step 数，记录 loss。
-7. 记录 `torch.cuda.max_memory_allocated()`。
+1. 固定 seed。
+2. 构建 synthetic dataset。
+3. 构建 MLP。
+4. 使用标准 `torch.optim.Adam`。
+5. 训练固定 step 数。
+6. 记录 loss、参数量、梯度范数和 CUDA 显存。
+7. 输出 baseline loss 曲线，作为后续 `ZeroAdam` 对照。
 
-这条 loss 曲线是后续 `ZeroAdam` 必须对齐的基线。
+这一步不使用 DDP。
 
-### Phase 4: ZeroAdam 核心实现
+运行命令：
 
-目标：手写 ZeRO-1 optimizer states 分片。
+```bash
+bash scripts/run_baseline.sh
+```
+
+可选快速测试：
+
+```bash
+bash scripts/run_baseline.sh --steps 10 --log-interval 1
+```
+
+### Phase 4: 单 GPU ZeroAdam
 
 计划文件：
 
@@ -193,28 +213,26 @@ scripts/run_baseline.sh
 optimizer/zero_adam.py
 ```
 
-核心步骤：
+实现内容：
 
-1. 收集模型中所有 trainable parameters。
-2. 把参数 flatten 成一个一维大 tensor。
-3. 把梯度 flatten 成一个一维大 tensor。
-4. 根据 `rank` 和 `world_size` 计算当前 rank 负责的 shard 范围。
-5. 每个 rank 只为自己的 shard 初始化 Adam 状态：
+1. 收集所有 trainable parameters。
+2. 将参数 flatten 成一个一维 tensor。
+3. 将梯度 flatten 成一个一维 tensor。
+4. 在单 GPU 下令 shard 范围覆盖完整 flat tensor。
+5. 只维护本地 Adam states：
 
 ```text
 local_exp_avg
 local_exp_avg_sq
+step
 ```
 
-6. 每个 step 只更新本地 shard。
-7. 使用 `dist.all_gather_into_tensor` 收集所有 rank 更新后的参数 shard。
-8. 把完整 flat parameter 写回原模型参数。
+6. 用 Adam 公式更新 flat tensor。
+7. 将更新后的 flat tensor 写回原模型参数。
 
-注意：第一版只支持所有 rank 形状一致、使用 dense gradients、单 optimizer group，先保证主线正确。
+单 GPU 下这不会节省显存，但能验证 ZeRO-1 optimizer state 管理的核心代码路径。
 
-### Phase 5: 手动梯度同步 + Zero 训练入口
-
-目标：不用 DDP 的 optimizer 行为，显式控制梯度同步和参数广播。
+### Phase 5: ZeroAdam 训练入口
 
 计划文件：
 
@@ -223,55 +241,43 @@ train_zero.py
 scripts/run_zero.sh
 ```
 
-训练逻辑：
+训练流程与 baseline 保持一致，只把 optimizer 从标准 Adam 换成手写 `ZeroAdam`。
 
-1. 每个 rank 拥有完整模型副本。
-2. forward / backward 得到本地梯度。
-3. 对每个参数梯度执行 `dist.all_reduce`。
-4. 梯度除以 `world_size`，得到全局平均梯度。
-5. 调用 `ZeroAdam.step()`。
-6. `ZeroAdam` 内部更新本地 shard 并 all-gather 完整参数。
-7. 记录 loss 和显存。
+目标：
 
-理论上，在相同 seed、相同 batch、相同 Adam 超参数下，`train_zero.py` 的 loss 应和 `train_baseline.py` 接近对齐。
+- 使用相同 seed。
+- 使用相同 synthetic data。
+- 使用相同 MLP 配置。
+- 使用相同学习率和 step 数。
+- 对比 baseline loss 与 zero loss。
 
-### Phase 6: 正确性与显存对比
+### Phase 6: 正确性对比
 
-目标：先在单 GPU 上证明 Toy-ZeRO-1 的数学正确性，再在多 GPU 环境下验证显存节省预期。
+最终验证项：
 
-验证项：
-
-- Baseline loss 和 Zero loss 在固定 step 内接近。
-- 每个 rank 的模型参数在 `ZeroAdam.step()` 后保持一致。
-- 单 GPU 下，ZeRO-1 的 optimizer state 本地元素数量等于完整 Adam state，作为退化正确性测试。
-- 多 GPU 下，ZeRO-1 的 optimizer state 本地元素数量约等于完整 Adam state 的 `1 / world_size`。
-- 多 GPU 且较大模型配置下，ZeRO-1 的 `max_memory_allocated` 应低于 baseline。
-
-建议命令：
-
-```bash
-bash scripts/run_baseline.sh
-bash scripts/run_zero.sh
-```
+- baseline loss 和 zero loss 接近。
+- `ZeroAdam` step 后参数仍是有限值。
+- 梯度 flatten / parameter write-back 无 shape 错误。
+- 在同一配置下重复运行结果稳定。
 
 ## 开发约束
 
-- 所有脚本默认在 Linux/WSL2 Ubuntu 中运行。
+- 所有主训练脚本默认单 GPU。
+- 所有脚本默认在 WSL2 Ubuntu 中运行。
 - 所有路径使用 Linux 风格 `/`。
-- 多进程训练使用 `torchrun`。
-- 分布式 backend 默认使用 NCCL。
-- 初期避免引入 DeepSpeed、FairScale 等高级封装。
-- 第一版优先正确性，再优化性能和边界情况。
+- 主训练入口使用 `python train_*.py`，不使用 DDP。
+- 不引入 DeepSpeed、FairScale 等高级封装。
+- 第一版优先数学正确性和可读性。
 
 ## 当前进度
 
-- [x] 明确 Toy-ZeRO-1 项目目标
-- [x] 明确 WSL2 + CUDA + NCCL 作为目标运行环境
-- [x] 重写 README 与建设路线
-- [x] 实现分布式初始化工具
-- [x] 实现分布式 smoke test
+- [x] 明确单 GPU 作为固定硬件条件
+- [x] 明确 Toy-ZeRO-1 的单 rank/reference 实现定位
+- [x] 实现基础工具
+- [x] 实现 distributed smoke test
 - [x] 实现 MLP 与 synthetic data
-- [ ] 实现 DDP + Adam baseline
-- [ ] 实现 ZeroAdam optimizer states 分片
-- [ ] 实现 ZeRO-1 训练入口
-- [ ] 完成 loss 与显存对比
+- [x] 实现模型 smoke test
+- [x] 实现单 GPU Adam baseline
+- [ ] 实现单 GPU ZeroAdam
+- [ ] 实现 ZeroAdam 训练入口
+- [ ] 完成 baseline 与 ZeroAdam loss 对比
