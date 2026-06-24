@@ -94,6 +94,8 @@ Toy-ZeRO-1/
 │   ├── smoke_model.py
 │   ├── run_smoke_model.sh
 │   ├── run_baseline.sh
+│   ├── check_zero_adam.py
+│   ├── run_zero_adam_check.sh
 │   └── run_zero.sh
 ├── train_baseline.py
 ├── train_zero.py
@@ -121,6 +123,12 @@ bash scripts/run_smoke_model.sh
 
 ```bash
 bash scripts/run_smoke_model.sh --hidden-dim 1024 --num-hidden-layers 4 --batch-size 64
+```
+
+`ZeroAdam` 与标准 Adam 的逐步参数对齐测试：
+
+```bash
+bash scripts/run_zero_adam_check.sh
 ```
 
 ## 建设路线
@@ -207,10 +215,12 @@ bash scripts/run_baseline.sh --steps 10 --log-interval 1
 
 ### Phase 4: 单 GPU ZeroAdam
 
-计划文件：
+已实现：
 
 ```text
 optimizer/zero_adam.py
+scripts/check_zero_adam.py
+scripts/run_zero_adam_check.sh
 ```
 
 实现内容：
@@ -231,6 +241,23 @@ step
 7. 将更新后的 flat tensor 写回原模型参数。
 
 单 GPU 下这不会节省显存，但能验证 ZeRO-1 optimizer state 管理的核心代码路径。
+
+第一版约束：
+
+- 只支持一个参数组。
+- 所有参数必须位于同一设备并使用同一浮点 dtype。
+- 每个 trainable parameter 在每一步都必须具有 dense gradient。
+- 支持标准 Adam 的 `lr`、`betas`、`eps` 和 L2 `weight_decay`。
+- 暂不支持 AMSGrad、maximize、foreach、fused 和 mixed precision master weights。
+
+运行正确性测试：
+
+```bash
+bash scripts/run_zero_adam_check.sh
+```
+
+该测试使用相同初始模型和相同 batch，逐步比较 `ZeroAdam` 与
+`torch.optim.Adam(foreach=False, fused=False)` 的 loss 和所有模型参数。
 
 ### Phase 5: ZeroAdam 训练入口
 
@@ -278,6 +305,7 @@ scripts/run_zero.sh
 - [x] 实现 MLP 与 synthetic data
 - [x] 实现模型 smoke test
 - [x] 实现单 GPU Adam baseline
-- [ ] 实现单 GPU ZeroAdam
+- [x] 实现单 GPU ZeroAdam
+- [x] 完成 ZeroAdam 与标准 Adam 的逐步参数更新对齐
 - [ ] 实现 ZeroAdam 训练入口
 - [ ] 完成 baseline 与 ZeroAdam loss 对比
